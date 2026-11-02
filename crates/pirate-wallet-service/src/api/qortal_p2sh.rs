@@ -320,6 +320,29 @@ fn resolve_fixed_internal_change_index(
     Ok(existing_index.unwrap_or(0))
 }
 
+pub(super) fn load_funding_notes(
+    db: &Database,
+    repo: &Repository,
+    account_id: i64,
+    source_key_id: i64,
+) -> Result<(
+    tx_flow::SpendSelectionAnchors,
+    Vec<pirate_core::selection::SelectableNote>,
+)> {
+    // The raw note loader restores note plaintext and positions only. Like
+    // ordinary sends, P2SH funding needs confirmed notes with shardtree witnesses
+    // constructed at each pool's spend-selection anchor.
+    let anchors = tx_flow::compute_spend_selection_anchors(db, account_id)?;
+    let notes = tx_flow::load_selectable_notes_for_send(
+        repo,
+        account_id,
+        anchors,
+        Some(vec![source_key_id]),
+        None,
+    )?;
+    Ok((anchors, notes))
+}
+
 pub async fn qortal_send_p2sh(
     wallet_id: WalletId,
     request: QortalP2shSendRequest,
@@ -379,11 +402,8 @@ pub async fn qortal_send_p2sh(
         }
     }
 
-    let notes = repo.get_unspent_selectable_notes_filtered(
-        secret.account_id,
-        Some(vec![source_key_id]),
-        None,
-    )?;
+    sync_control::require_spendability_ready_with_sync_trigger(&wallet_id)?;
+    let (anchors, notes) = load_funding_notes(&db, &repo, secret.account_id, source_key_id)?;
     if notes.is_empty() {
         return Err(anyhow!(
             "Input address {} belongs to a key group with no spendable shielded notes",
@@ -391,7 +411,6 @@ pub async fn qortal_send_p2sh(
         ));
     }
 
-    let spendability = sync_control::require_spendability_ready_with_sync_trigger(&wallet_id)?;
     let orchard_anchor = if notes
         .iter()
         .any(|note| note.note_type == pirate_core::selection::NoteType::Ironwood)
@@ -400,7 +419,7 @@ pub async fn qortal_send_p2sh(
                 || output.addr.starts_with("pirate-test1")
                 || output.addr.starts_with("pirate-regtest1")
         }) {
-        current_orchard_anchor(&repo, spendability.anchor_height)?
+        current_orchard_anchor(&repo, anchors.ironwood_anchor_height)?
     } else {
         None
     };
@@ -416,8 +435,8 @@ pub async fn qortal_send_p2sh(
             || output.addr.starts_with("pirate-regtest1")
     });
     let use_orchard_change = has_orchard_spends || has_orchard_outputs;
-    let target_height = u32::try_from(spendability.target_height)
-        .map_err(|_| anyhow!("Target height exceeds u32"))?;
+    let target_height =
+        u32::try_from(anchors.target_height).map_err(|_| anyhow!("Target height exceeds u32"))?;
     let sync_state = pirate_storage_sqlite::SyncStateStorage::new(&db).load_sync_state()?;
     let ironwood_activation_height = Network::from_type(network_type)
         .ironwood_activation_height

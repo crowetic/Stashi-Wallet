@@ -206,6 +206,221 @@ fn seed_sapling_shardtree_checkpoint(db: &Database, checkpoint_height: u32, cmus
     tx.commit().expect("failed to commit shardtree seed");
 }
 
+fn insert_ironwood_funding_note(
+    repo: &Repository,
+    account_id: i64,
+    key_id: i64,
+    tag: u8,
+    position: i64,
+    height: i64,
+) -> orchard::note::ExtractedNoteCommitment {
+    use orchard::note::{NoteVersion, RandomSeed, Rho};
+    let key = pirate_core::keys::IronwoodExtendedSpendingKey::master(&[tag; 32]).unwrap();
+    let address = key.to_extended_fvk().address_at(0);
+    let rho = Rho::from_bytes(&[tag; 32]).unwrap();
+    let rseed = RandomSeed::from_bytes([tag; 32], &rho).unwrap();
+    let note = orchard::Note::from_parts(
+        address.inner,
+        orchard::value::NoteValue::from_raw(50_000),
+        rho,
+        rseed,
+        NoteVersion::V3,
+    )
+    .unwrap();
+    let commitment = orchard::note::ExtractedNoteCommitment::from(note.commitment());
+    let mut blob = vec![1];
+    blob.extend_from_slice(&address.inner.to_raw_address_bytes());
+    blob.extend_from_slice(&rho.to_bytes());
+    blob.extend_from_slice(rseed.as_bytes());
+    repo.insert_note(&NoteRecord {
+        id: None,
+        account_id,
+        key_id: Some(key_id),
+        note_type: DbNoteType::Ironwood,
+        value: 50_000,
+        nullifier: vec![tag; 32],
+        commitment: commitment.to_bytes().to_vec(),
+        spent: false,
+        height,
+        txid: vec![tag; 32],
+        output_index: 0,
+        address_id: None,
+        spent_txid: None,
+        diversifier: None,
+        note: Some(blob),
+        position: Some(position),
+        memo: None,
+    })
+    .unwrap();
+    commitment
+}
+
+fn seed_ironwood_funding_checkpoint(
+    db: &Database,
+    height: u32,
+    commitments: &[orchard::note::ExtractedNoteCommitment],
+) {
+    let store = pirate_storage_sqlite::shardtree_store::SqliteShardStore::<
+        _,
+        orchard::tree::MerkleHashOrchard,
+        16,
+    >::from_connection(db.conn(), "orchard")
+    .unwrap();
+    let mut tree: ShardTree<_, 32, 16> = ShardTree::new(store, 1_000);
+    for commitment in commitments {
+        tree.append(
+            orchard::tree::MerkleHashOrchard::from_cmx(commitment),
+            Retention::Marked,
+        )
+        .unwrap();
+    }
+    tree.checkpoint(BlockHeight::from(height)).unwrap();
+}
+
+fn seed_funding_scan_range(db: &Database) {
+    pirate_storage_sqlite::scan_queue::ScanQueueStorage::new(db)
+        .record_historic_scanned_range(1, 1_201, Some("qortal-funding-regression"))
+        .unwrap();
+}
+
+#[test]
+fn qortal_funding_hydrates_sapling_and_ironwood_at_their_own_anchors() {
+    let (db, account_id) = setup_repo();
+    let repo = Repository::new(&db);
+    let key = insert_account_key(
+        &repo,
+        account_id,
+        KeyType::Seed,
+        true,
+        true,
+        true,
+        "funding",
+    );
+    let cmu = insert_sapling_note(&repo, account_id, key, 30_000, 3, 0);
+    let cmx = insert_ironwood_funding_note(&repo, account_id, key, 7, 0, 1000);
+    seed_funding_scan_range(&db);
+    seed_sapling_shardtree_checkpoint(&db, 1_005, &[cmu]);
+    seed_ironwood_funding_checkpoint(&db, 1_010, &[cmx]);
+
+    // Reproduce the old adapter: a readable note and position do not include
+    // the Merkle path required by the transaction builder.
+    let raw = repo
+        .get_unspent_selectable_notes_filtered(account_id, Some(vec![key]), None)
+        .unwrap();
+    assert_eq!(raw.len(), 2);
+    assert!(raw
+        .iter()
+        .all(|n| n.merkle_path.is_none() && n.ironwood_merkle_path.is_none()));
+
+    let sapling_key = pirate_core::keys::ExtendedSpendingKey::from_mnemonic(
+        "legal winner thank year wave sausage worth useful legal winner thank yellow",
+    )
+    .unwrap();
+    let ironwood_key = pirate_core::keys::IronwoodExtendedSpendingKey::master(&[7; 32]).unwrap();
+    let error =
+        pirate_core::build_qortal_p2sh_funding_transaction(pirate_core::QortalP2shFundingPlan {
+            network_type: NetworkType::Mainnet,
+            default_sapling_spending_key: &sapling_key,
+            default_ironwood_spending_key: Some(&ironwood_key),
+            sapling_spending_keys_by_id: HashMap::new(),
+            ironwood_spending_keys_by_id: HashMap::new(),
+            available_notes: raw
+                .into_iter()
+                .filter(|n| n.ironwood_note.is_some())
+                .collect(),
+            target_height: 5_000_000,
+            ironwood_activation_height: Some(1),
+            ironwood_anchor: repo.resolve_orchard_anchor_from_db_state(1_010).unwrap(),
+            change_diversifier_index: 0,
+            recipients: vec![pirate_core::QortalRecipient::Transparent {
+                address: zcash_transparent::address::TransparentAddress::ScriptHash([1; 20]),
+                amount: 20_000,
+            }],
+            fee: 10_000,
+            script_pubkey: vec![0x6a, 0x00],
+            script_each_recipient: true,
+        })
+        .unwrap_err();
+    assert!(error.to_string().contains("Missing Ironwood merkle path"));
+
+    let (anchors, notes) =
+        super::qortal_p2sh::load_funding_notes(&db, &repo, account_id, key).unwrap();
+    assert_eq!(anchors.target_height, 1_201);
+    assert_eq!(anchors.sapling_anchor_height, 1_005);
+    assert_eq!(anchors.ironwood_anchor_height, 1_010);
+    assert_eq!(notes.len(), 2);
+    for note in notes {
+        match note.note_type {
+            pirate_core::selection::NoteType::Sapling => {
+                let root = note.merkle_path.unwrap().root(sapling::Node::from_cmu(
+                    &SaplingExtractedNoteCommitment::from_bytes(&cmu).unwrap(),
+                ));
+                assert_eq!(
+                    root.to_bytes(),
+                    repo.resolve_sapling_root_from_db_state(1_005)
+                        .unwrap()
+                        .unwrap()
+                );
+            }
+            pirate_core::selection::NoteType::Ironwood => {
+                let root = note.ironwood_merkle_path.unwrap().root(cmx);
+                let anchor = repo
+                    .resolve_orchard_anchor_from_db_state(anchors.ironwood_anchor_height)
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(root.to_bytes(), anchor.to_bytes());
+                assert_eq!(note.ironwood_anchor.unwrap().to_bytes(), anchor.to_bytes());
+            }
+        }
+    }
+}
+
+#[test]
+fn qortal_funding_does_not_pass_notes_without_witnesses_to_the_builder() {
+    let (db, account_id) = setup_repo();
+    let repo = Repository::new(&db);
+    let key = insert_account_key(
+        &repo,
+        account_id,
+        KeyType::Seed,
+        true,
+        true,
+        true,
+        "funding",
+    );
+    insert_ironwood_funding_note(&repo, account_id, key, 7, 0, 1000);
+    seed_funding_scan_range(&db);
+    let (_, notes) = super::qortal_p2sh::load_funding_notes(&db, &repo, account_id, key).unwrap();
+    assert!(notes.is_empty(), "Missing shardtree state must fail closed");
+}
+
+#[test]
+fn qortal_funding_excludes_recent_notes_and_other_key_groups() {
+    let (db, account_id) = setup_repo();
+    let repo = Repository::new(&db);
+    let key = insert_account_key(
+        &repo,
+        account_id,
+        KeyType::Seed,
+        true,
+        true,
+        true,
+        "funding",
+    );
+    let other = insert_account_key(&repo, account_id, KeyType::Seed, true, true, true, "other");
+    let cmx = insert_ironwood_funding_note(&repo, account_id, key, 7, 0, 1000);
+    let other_cmx = insert_ironwood_funding_note(&repo, account_id, other, 8, 1, 1000);
+    let recent_cmx = insert_ironwood_funding_note(&repo, account_id, key, 9, 2, 1100);
+    seed_funding_scan_range(&db);
+    seed_ironwood_funding_checkpoint(&db, 1_010, &[cmx, other_cmx, recent_cmx]);
+
+    let (_, notes) = super::qortal_p2sh::load_funding_notes(&db, &repo, account_id, key).unwrap();
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0].txid, vec![7u8; 32]);
+    assert_eq!(notes[0].key_id, Some(key));
+    assert!(notes[0].ironwood_merkle_path.is_some());
+}
+
 #[test]
 fn test_normalize_filter_ids_deduplicates_and_drops_empty() {
     assert_eq!(normalize_filter_ids(Some(vec![])), None);

@@ -88,7 +88,7 @@ pub(super) struct SpendSelectionAnchors {
     pub(super) ironwood_anchor_height: u64,
 }
 
-fn compute_spend_selection_anchors(
+pub(super) fn compute_spend_selection_anchors(
     db: &Database,
     account_id: i64,
 ) -> Result<SpendSelectionAnchors> {
@@ -107,7 +107,7 @@ fn compute_spend_selection_anchors(
     })
 }
 
-fn load_selectable_notes_for_send(
+pub(super) fn load_selectable_notes_for_send(
     repo: &Repository,
     account_id: i64,
     anchors: SpendSelectionAnchors,

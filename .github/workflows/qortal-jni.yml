@@ -1,0 +1,163 @@
+name: Qortal JNI - Combined Native Bundle
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: qortal-jni-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RUST_VERSION: "1.91.1"
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+  GITHUB_API_PUBLIC_READONLY_TOKEN: ${{ github.token }}
+
+jobs:
+  tests:
+    name: Qortal funding and packaging regressions
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          components: rustfmt
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            crates/target
+          key: qortal-tests-${{ runner.os }}-${{ env.RUST_VERSION }}-${{ hashFiles('crates/Cargo.lock') }}
+      - name: Validate packaging and immutable Action references
+        run: |
+          python scripts/check_pinned_actions.py
+          python -m unittest discover -s scripts/tests -p 'test_qortal*.py'
+          python -m unittest discover -s scripts/tests -p 'test_release_artifact_versions.py'
+          bash -n scripts/build-qortal-jni.sh
+      - name: Run native Qortal regressions
+        working-directory: crates
+        env:
+          CARGO_BUILD_JOBS: "2"
+          CARGO_PROFILE_TEST_DEBUG: "0"
+          CARGO_PROFILE_DEV_DEBUG: "0"
+        run: |
+          cargo fmt --all -- --check
+          cargo test -p pirate-wallet-service --lib qortal --locked
+          cargo test -p pirate-core qortal_p2sh --locked
+          cargo test -p pirate-qortal-jni --locked
+          cargo test -p pirate-cli-core --lib qortal_ --locked
+
+  native:
+    name: Build and smoke-test ${{ matrix.target }}
+    needs: tests
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: windows-2025-vs2026
+            target: x86_64-pc-windows-msvc
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos-15
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12"
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: ${{ matrix.target }}
+      - uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6
+        with:
+          distribution: temurin
+          java-version: "17"
+      - name: Install Perl for the Windows OpenSSL build
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install strawberryperl --version 5.42.0.1 --no-progress -y
+          "C:\Strawberry\perl\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding ascii -Append
+      - name: Build the native library
+        shell: bash
+        env:
+          QORTAL_JNI_TARGET: ${{ matrix.target }}
+        run: bash scripts/build-qortal-jni.sh
+      - name: Check Linux compatibility
+        if: runner.os == 'Linux'
+        run: python scripts/verify_linux_glibc.py --max-version 2.35 dist/qortal-jni
+      - name: Load the library and test the Java JNI contract
+        shell: bash
+        run: >-
+          python scripts/qortal_jni_bundle.py smoke
+          --directory dist/qortal-jni --target '${{ matrix.target }}'
+      - name: Record artifact identity and checksums
+        shell: bash
+        run: >-
+          python scripts/qortal_jni_bundle.py record
+          --directory dist/qortal-jni --target '${{ matrix.target }}'
+          --commit "$GITHUB_SHA" --repository "$GITHUB_REPOSITORY" --run-id "$GITHUB_RUN_ID"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: qortal-jni-native-${{ matrix.target }}
+          path: dist/qortal-jni/
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 30
+
+  bundle:
+    name: Combine and verify all five native libraries
+    needs: native
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          pattern: qortal-jni-native-*
+          path: native-artifacts
+      - name: Validate identities and create the combined ZIP
+        run: |
+          python scripts/qortal_jni_bundle.py bundle \
+            --directory native-artifacts --output dist/qortal-jni-combined \
+            --commit "$GITHUB_SHA" --repository "$GITHUB_REPOSITORY" --run-id "$GITHUB_RUN_ID"
+          cd dist/qortal-jni-combined
+          sha256sum --check ./*.zip.sha256
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        id: upload
+        with:
+          name: qortal-jni-combined-${{ github.sha }}
+          path: dist/qortal-jni-combined/
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 30
+      - name: Report the downloadable bundle
+        env:
+          ARTIFACT_URL: ${{ steps.upload.outputs.artifact-url }}
+        run: |
+          {
+            echo "Qortal JNI bundle built from $GITHUB_SHA"
+            echo
+            echo "[Download the combined artifact]($ARTIFACT_URL)"
+            echo
+            cat dist/qortal-jni-combined/*.zip.sha256
+          } >> "$GITHUB_STEP_SUMMARY"

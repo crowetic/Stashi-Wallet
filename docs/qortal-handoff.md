@@ -185,6 +185,37 @@ cargo test -p pirate-cli-core --lib qortal_ --locked
 cargo test -p pirate-core qortal_p2sh --locked -- --nocapture
 ```
 
+### Qortal fork build: JNI 0.3.9
+
+The Qortal fork fixes P2SH funding note selection to hydrate Sapling and Ironwood
+Merkle paths at their respective spend anchors, using the same selection gates
+as ordinary wallet sends. This resolves the native `Missing Ironwood merkle path`
+funding error. It does not change the JNI signatures or database schema.
+
+The **Qortal JNI - Combined Native Bundle** workflow in `.github/workflows/qortal-jni.yml`
+can be run manually on the fork's default branch. It runs the Qortal funding,
+core, JNI and CLI regressions before building all five desktop libraries on
+matching native runners. Each library passes the Java smoke test, including
+switching between two isolated storage namespaces. This tests sequential
+namespace selection; independent concurrent historical rescans still require
+separate native contexts or processes.
+
+The combined Actions artifact contains `stashi-qortal-jni-0.3.9-<commit>.zip`,
+its SHA-256 file, and a manifest. The ZIP has all five libraries, the Java
+wrapper, handoff, license, per-file checksums, and the source commit and workflow
+identity. Packaging rejects missing platforms, mismatched source revisions,
+wrong architectures, or changed bytes. Builds use the committed lockfile and
+require no Pirate release-signing secrets. These are Qortal fork artifacts,
+not upstream-signed Stashi releases. Actions artifacts are retained for 30 days;
+download and retain a verified copy for publication.
+
+Before public QDN use, verify funded P2SH creation, spending returned change,
+redemption and refund, and the two-Hub account-switching flow with the matching
+Core fixes. Core's staging and publishing tools must explicitly pin the new
+reviewed artifact version and SHA-256 instead of treating this as the official
+v1.2.6 archive. Use a distinct test QDN identifier first and only select the new
+QDN signature after confirmation. Restart Core to load a changed native library.
+
 The JNI library also exports `invokeJson(requestJson, pretty)`, which exposes
 the typed `WalletServiceRequest` contract directly for future Qortal code that
 no longer needs command-string compatibility.
