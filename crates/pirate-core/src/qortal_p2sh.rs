@@ -128,6 +128,7 @@ pub struct QortalP2shRedeemPlan {
     pub ironwood_activation_height: Option<u32>,
     pub ironwood_anchor: Option<IronwoodAnchor>,
     pub funding_txid: [u8; 32],
+    pub funding_output_index: u32,
     pub funding_coin: TxOut,
     pub recipients: Vec<QortalRecipient>,
     pub fee: u64,
@@ -808,7 +809,7 @@ pub fn build_qortal_p2sh_redeem_transaction(
 
     let transparent_bundle = Some(TransparentBundle {
         vin: vec![TxIn::from_parts(
-            OutPoint::new(plan.funding_txid, 0),
+            OutPoint::new(plan.funding_txid, plan.funding_output_index),
             (),
             sequence,
         )],
@@ -901,7 +902,7 @@ pub fn build_qortal_p2sh_redeem_transaction(
 
     let signed_transparent_bundle = Some(TransparentBundle {
         vin: vec![TxIn::from_parts(
-            OutPoint::new(plan.funding_txid, 0),
+            OutPoint::new(plan.funding_txid, plan.funding_output_index),
             script_sig,
             sequence,
         )],
@@ -982,6 +983,7 @@ mod tests {
             ironwood_activation_height: None,
             ironwood_anchor: None,
             funding_txid: [4u8; 32],
+            funding_output_index: 0,
             funding_coin: funding_coin(50_000),
             recipients: vec![transparent_recipient(7, 40_000)],
             fee: 10_000,
@@ -1148,6 +1150,30 @@ mod tests {
 
         assert!(script_sig.contains(&0x51));
         assert!(script_sig.ends_with(&[0x51, 0x21, 0x02]));
+    }
+
+    #[test]
+    fn redeem_and_refund_sign_and_serialize_the_selected_outpoint() {
+        for (locktime, secret) in [(0, vec![8u8]), (10, Vec::new())] {
+            let mut original = redeem_plan(locktime, secret.clone());
+            original.funding_coin = funding_coin(60_000);
+            original.fee = 20_000;
+            let original = build_qortal_p2sh_redeem_transaction(original).unwrap();
+            let original = crate::read_pirate_transaction(&original.raw_tx).unwrap();
+
+            let mut indexed = redeem_plan(locktime, secret);
+            indexed.funding_coin = funding_coin(60_000);
+            indexed.fee = 20_000;
+            indexed.funding_output_index = 2;
+            let indexed = build_qortal_p2sh_redeem_transaction(indexed).unwrap();
+            let indexed = crate::read_pirate_transaction(&indexed.raw_tx).unwrap();
+            let original_input = &original.transparent_bundle().unwrap().vin[0];
+            let indexed_input = &indexed.transparent_bundle().unwrap().vin[0];
+            assert_eq!(original_input.prevout().n(), 0);
+            assert_eq!(indexed_input.prevout().n(), 2);
+            // Index must participate in the signature hash, as well as the final transaction.
+            assert_ne!(original_input.script_sig(), indexed_input.script_sig());
+        }
     }
 
     #[test]

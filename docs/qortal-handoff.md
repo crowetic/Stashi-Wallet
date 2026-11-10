@@ -114,7 +114,7 @@ as one logical batch (`batch_num: 0`, `batch_total: 1`).
 | `export` | Returns the active-pool address and matching keys from its spendable key group |
 | `send` | Selects the key group identified by the supplied wallet-owned input address |
 | `sendp2sh` | Funds the supplied P2SH script from that key group's Sapling or Ironwood notes |
-| `redeemp2sh` | Redeems or refunds funding output zero |
+| `redeemp2sh` / `redeemp2sh_indexed` | Redeems or refunds the selected funding output (`funding_output_index`, default 0) |
 | `encryptionstatus` | Always reports encrypted storage |
 | `encrypt`, `decrypt`, `unlock` | Transition-compatible success responses; storage is unlocked by `configurestorage()` |
 
@@ -164,6 +164,16 @@ target does not. The history limit applies after this filtering. Consumers
 should use the top-level `fee` once per transaction, not infer one fee per
 recipient metadata item; a single transaction can have several recipients or a
 recovered/unknown remainder.
+
+The P2SH redeem/refund JSON accepts `funding_output_index` as an unsigned 32-bit
+integer, defaulting to zero when omitted by older clients. The service validates
+the selected transparent output's script and value. Both the signature hash and
+final input outpoint use that index. Core persists the original HTLC reserve and
+passes it as `fee`; the funding output must equal payout plus that reserve.
+For a nonzero index, Core uses the new `redeemp2sh_indexed` alias, which older
+libraries reject as unsupported rather than ignoring the JSON field and signing
+output zero. This change requires a new reviewed JNI build and immutable QDN
+publication before nonzero-output recovery is available on a deployed node.
 
 P2SH redemption verifies that the input is P2SH, the redeem script hashes to
 that address, and funding output zero pays the same address. It rejects a

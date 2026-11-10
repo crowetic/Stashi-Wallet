@@ -335,7 +335,7 @@ fn execute_legacy_command(command: &str, args: &str) -> Result<String> {
             let txid = execute(WalletServiceRequest::QortalSendP2sh { wallet_id, request })?;
             json!({ "txid": txid })
         }
-        "redeemp2sh" => {
+        "redeemp2sh" | "redeemp2sh_indexed" => {
             let request: QortalP2shRedeemRequest = serde_json::from_str(args)
                 .map_err(|err| anyhow!("Invalid redeemp2sh JSON: {}", err))?;
             let txid = execute(WalletServiceRequest::QortalRedeemP2sh { wallet_id, request })?;

@@ -25,6 +25,8 @@ pub struct QortalP2shRedeemRequest {
     pub fee: u64,
     pub script: String,
     pub txid: String,
+    #[serde(default)]
+    pub funding_output_index: u32,
     pub locktime: u64,
     pub secret: String,
     pub privkey: String,
@@ -513,6 +515,27 @@ pub async fn qortal_send_p2sh(
     tx_flow::broadcast_tx_for_wallet(wallet_id, signed).await
 }
 
+fn select_funding_output(
+    outputs: &[zcash_transparent::bundle::TxOut],
+    index: u32,
+    input_address: &TransparentAddress,
+) -> Result<zcash_transparent::bundle::TxOut> {
+    let output = outputs.get(index as usize).ok_or_else(|| {
+        anyhow!(
+            "Funding transaction is missing transparent output {}",
+            index
+        )
+    })?;
+    let expected_script: zcash_transparent::address::Script = (&input_address.script()).into();
+    if output.script_pubkey() != &expected_script {
+        return Err(anyhow!(
+            "Funding transaction output {} does not match the P2SH input address",
+            index
+        ));
+    }
+    Ok(output.clone())
+}
+
 pub async fn qortal_redeem_p2sh(
     wallet_id: WalletId,
     request: QortalP2shRedeemRequest,
@@ -559,18 +582,14 @@ pub async fn qortal_redeem_p2sh(
     let funding_raw = client.get_transaction(&txid).await?;
     let funding_tx = read_pirate_transaction(&funding_raw)
         .map_err(|e| anyhow!("Failed to parse funding transaction: {}", e))?;
-    let funding_output = funding_tx
-        .transparent_bundle()
-        .and_then(|bundle| bundle.vout.first())
-        .cloned()
-        .ok_or_else(|| anyhow!("Funding transaction is missing transparent output 0"))?;
-    let expected_funding_script: zcash_transparent::address::Script =
-        (&input_address.script()).into();
-    if funding_output.script_pubkey() != &expected_funding_script {
-        return Err(anyhow!(
-            "Funding transaction output 0 does not match the P2SH input address"
-        ));
-    }
+    let funding_output = select_funding_output(
+        funding_tx
+            .transparent_bundle()
+            .map(|bundle| bundle.vout.as_slice())
+            .unwrap_or(&[]),
+        request.funding_output_index,
+        &input_address,
+    )?;
 
     let orchard_anchor = if request.output.iter().any(|output| {
         output.addr.starts_with("pirate1")
@@ -601,6 +620,7 @@ pub async fn qortal_redeem_p2sh(
         ironwood_activation_height,
         ironwood_anchor: orchard_anchor,
         funding_txid: txid,
+        funding_output_index: request.funding_output_index,
         funding_coin: funding_output,
         recipients,
         fee: request.fee,
@@ -651,6 +671,48 @@ mod tests {
             .encode_for_network(NetworkType::Mainnet)
             .unwrap();
         Output::new(orchard_address, 10_000, Some("memo".to_string()))
+    }
+
+    #[test]
+    fn funding_output_index_defaults_to_zero_and_accepts_two() {
+        let legacy = serde_json::json!({
+            "input": "input", "output": [], "fee": 10000, "script": "script",
+            "txid": "txid", "locktime": 1, "secret": "", "privkey": "key"
+        });
+        let request: QortalP2shRedeemRequest = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(request.funding_output_index, 0);
+        let mut indexed = legacy;
+        indexed["funding_output_index"] = serde_json::json!(2);
+        let request: QortalP2shRedeemRequest = serde_json::from_value(indexed.clone()).unwrap();
+        assert_eq!(request.funding_output_index, 2);
+        indexed["funding_output_index"] = serde_json::json!(-1);
+        assert!(serde_json::from_value::<QortalP2shRedeemRequest>(indexed).is_err());
+    }
+
+    #[test]
+    fn selects_and_validates_the_requested_funding_output() {
+        use zcash_protocol::value::Zatoshis;
+        use zcash_transparent::{address::TransparentAddress, bundle::TxOut};
+        let address = TransparentAddress::ScriptHash([2u8; 20]);
+        let other = TransparentAddress::ScriptHash([3u8; 20]);
+        let output = TxOut::new(
+            Zatoshis::from_u64(60000).unwrap(),
+            (&address.script()).into(),
+        );
+        let wrong = TxOut::new(Zatoshis::from_u64(1).unwrap(), (&other.script()).into());
+        let outputs = vec![wrong.clone(), wrong, output.clone()];
+        assert_eq!(
+            super::select_funding_output(&outputs, 2, &address).unwrap(),
+            output
+        );
+        assert!(super::select_funding_output(&outputs, 0, &address)
+            .unwrap_err()
+            .to_string()
+            .contains("output 0 does not match"));
+        assert!(super::select_funding_output(&outputs, 3, &address)
+            .unwrap_err()
+            .to_string()
+            .contains("missing transparent output 3"));
     }
 
     #[test]
@@ -705,6 +767,7 @@ mod tests {
             fee: 10_000,
             script: bs58::encode(vec![1u8; 4]).into_string(),
             txid: bs58::encode(vec![2u8; 32]).into_string(),
+            funding_output_index: 0,
             locktime: 0,
             secret: String::new(),
             privkey: bs58::encode(vec![3u8; 32]).into_string(),
@@ -721,6 +784,7 @@ mod tests {
             fee: 10_000,
             script: bs58::encode(vec![1u8; 4]).into_string(),
             txid: bs58::encode(vec![2u8; 32]).into_string(),
+            funding_output_index: 0,
             locktime: 5,
             secret: bs58::encode(vec![4u8; 32]).into_string(),
             privkey: bs58::encode(vec![3u8; 32]).into_string(),
@@ -737,6 +801,7 @@ mod tests {
             fee: 10_000,
             script: bs58::encode(vec![1u8; 4]).into_string(),
             txid: bs58::encode(vec![2u8; 32]).into_string(),
+            funding_output_index: 0,
             locktime: 5,
             secret: String::new(),
             privkey: bs58::encode(vec![3u8; 32]).into_string(),
@@ -752,6 +817,7 @@ mod tests {
             fee: 10_000,
             script: bs58::encode(vec![1u8; 4]).into_string(),
             txid: bs58::encode(vec![2u8; 32]).into_string(),
+            funding_output_index: 0,
             locktime: 5,
             secret: String::new(),
             privkey: bs58::encode(vec![3u8; 32]).into_string(),
@@ -768,6 +834,7 @@ mod tests {
             fee: 10_000,
             script: bs58::encode(vec![1u8; 4]).into_string(),
             txid: bs58::encode(vec![2u8; 32]).into_string(),
+            funding_output_index: 0,
             locktime: 5,
             secret: String::new(),
             privkey: bs58::encode(vec![3u8; 32]).into_string(),
@@ -784,6 +851,7 @@ mod tests {
             fee: 10_000,
             script: bs58::encode(vec![2u8; 4]).into_string(),
             txid: bs58::encode(vec![2u8; 32]).into_string(),
+            funding_output_index: 0,
             locktime: 5,
             secret: String::new(),
             privkey: bs58::encode(vec![3u8; 32]).into_string(),
