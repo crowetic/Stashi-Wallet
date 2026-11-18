@@ -208,10 +208,14 @@ requires at least one Sapling spend; selecting
 only Ironwood inputs can produce `bad-txns-acprivacy-chain`. Mixed Sapling and
 Ironwood inputs remain supported. An Ironwood-only source key group now returns
 `Transaction build error: Qortal P2SH funding requires a spendable Sapling note`
-before proving or broadcasting. It does not automatically move funds between
-pools. Core recognizes this pre-broadcast error as a rejected funding attempt;
+before proving or broadcasting. It does not create a separate pool-conversion
+transaction to prepare Ironwood-only funds. Core recognizes this pre-broadcast
+error as a rejected funding attempt;
 unknown broadcast errors must still retain their duplicate-funding quarantine.
-Change-address registration now follows the selected input pools.
+Contract funding returns spendable change to Sapling and registers the matching
+change address, so mixed funding does not consume the key group's last Sapling
+note while leaving its change in Ironwood. Ordinary sends retain their existing
+change policy.
 
 This changes neither wallet nor Core database schemas, JNI signatures, nor the
 indexed redeem/refund commands from 0.3.9. Reverting the native library requires

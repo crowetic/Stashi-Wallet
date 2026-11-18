@@ -433,23 +433,14 @@ pub async fn qortal_send_p2sh(
         None
     };
 
-    let has_orchard_spends = notes
-        .iter()
-        .any(|note| note.note_type == pirate_core::selection::NoteType::Ironwood);
-    let has_orchard_outputs = request.output.iter().any(|output| {
-        output.addr.starts_with("pirate1")
-            || output.addr.starts_with("pirate-test1")
-            || output.addr.starts_with("pirate-regtest1")
-    });
-    let use_orchard_change = has_orchard_spends || has_orchard_outputs;
     let target_height =
         u32::try_from(anchors.target_height).map_err(|_| anyhow!("Target height exceeds u32"))?;
     let sync_state = pirate_storage_sqlite::SyncStateStorage::new(&db).load_sync_state()?;
     let ironwood_activation_height = Network::from_type(network_type)
         .ironwood_activation_height
         .or(sync_state.ironwood_activation_height);
-    let use_sapling_internal_change = !use_orchard_change
-        && pirate_core::sapling_internal_change_active_with_resolved_height(
+    let use_sapling_internal_change =
+        pirate_core::sapling_internal_change_active_with_resolved_height(
             network_type,
             u64::from(target_height),
             ironwood_activation_height,
@@ -457,31 +448,15 @@ pub async fn qortal_send_p2sh(
 
     let change_index =
         resolve_fixed_internal_change_index(&repo, secret.account_id, source_key_id)?;
-    if use_orchard_change || use_sapling_internal_change {
-        let (change_addr, address_type, diversifier_index_88) = if use_orchard_change {
-            let orchard_key = default_orchard_key
-                .as_ref()
-                .ok_or_else(|| anyhow!("Ironwood spending key required for Ironwood change"))?;
-            let address = orchard_key
-                .to_extended_fvk()
-                .address_at_internal(change_index)
-                .encode_for_network(network_type)?;
-            let mut index = [0u8; 11];
-            index[..4].copy_from_slice(&change_index.to_le_bytes());
-            (address, pirate_storage_sqlite::AddressType::Ironwood, index)
-        } else {
-            let internal_fvk = default_sapling_key.to_internal_fvk();
-            let payment_address = internal_fvk.derive_address(change_index);
-            let index = internal_fvk
-                .diversifier_index(&payment_address)
-                .map(|(index, _)| index)
-                .ok_or_else(|| anyhow!("Unable to recover Sapling change address index"))?;
-            (
-                payment_address.encode_for_network(network_type),
-                pirate_storage_sqlite::AddressType::Sapling,
-                index,
-            )
-        };
+    // Contract funding returns change to Sapling, including mixed-pool spends,
+    // so the next contract can satisfy Pirate's Sapling-spend requirement.
+    if use_sapling_internal_change {
+        let internal_fvk = default_sapling_key.to_internal_fvk();
+        let payment_address = internal_fvk.derive_address(change_index);
+        let diversifier_index_88 = internal_fvk
+            .diversifier_index(&payment_address)
+            .map(|(index, _)| index)
+            .ok_or_else(|| anyhow!("Unable to recover Sapling change address index"))?;
 
         let change_address = pirate_storage_sqlite::Address {
             id: None,
@@ -489,8 +464,8 @@ pub async fn qortal_send_p2sh(
             account_id: secret.account_id,
             diversifier_index: change_index,
             diversifier_index_88: Some(diversifier_index_88),
-            address: change_addr,
-            address_type,
+            address: payment_address.encode_for_network(network_type),
+            address_type: pirate_storage_sqlite::AddressType::Sapling,
             label: None,
             created_at: chrono::Utc::now().timestamp(),
             color_tag: pirate_storage_sqlite::address_book::ColorTag::None,

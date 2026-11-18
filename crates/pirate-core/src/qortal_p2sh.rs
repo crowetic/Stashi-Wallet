@@ -436,7 +436,6 @@ pub fn build_qortal_p2sh_funding_transaction(
         .recipients
         .iter()
         .any(|recipient| matches!(recipient, QortalRecipient::Ironwood { .. }));
-    let use_orchard_change = has_orchard_spends || has_orchard_outputs;
     let use_sapling_internal_change = crate::sapling_internal_change_active_with_resolved_height(
         plan.network_type,
         u64::from(plan.target_height),
@@ -458,7 +457,7 @@ pub fn build_qortal_p2sh_funding_transaction(
         SaplingAnchor::empty_tree()
     };
     let mut sapling_builder = new_sapling_builder(&network, target_height, sapling_anchor);
-    let mut ironwood_builder = if has_orchard_spends || has_orchard_outputs || use_orchard_change {
+    let mut ironwood_builder = if has_orchard_spends || has_orchard_outputs {
         Some(new_ironwood_builder(plan.ironwood_anchor.ok_or_else(
             || Error::TransactionBuild("Missing Ironwood anchor".to_string()),
         )?)?)
@@ -569,26 +568,9 @@ pub fn build_qortal_p2sh_funding_transaction(
     )?;
 
     if change >= CHANGE_DUST_THRESHOLD {
-        if use_orchard_change {
-            let orchard_key = plan.default_ironwood_spending_key.ok_or_else(|| {
-                Error::TransactionBuild("Missing Ironwood spending key for change".to_string())
-            })?;
-            let address = orchard_key
-                .to_extended_fvk()
-                .address_at_internal(plan.change_diversifier_index);
-            ironwood_builder
-                .as_mut()
-                .expect("ironwood builder")
-                .add_output(
-                    orchard_ovk,
-                    address.inner,
-                    IronwoodNoteValue::from_raw(change),
-                    *MemoBytes::empty().as_array(),
-                )
-                .map_err(|e| {
-                    Error::TransactionBuild(format!("Failed to add Ironwood change: {:?}", e))
-                })?;
-        } else if use_sapling_internal_change {
+        // Keep remaining contract funds in Sapling so a mixed spend does not
+        // consume the source key group's last input eligible for its next trade.
+        if use_sapling_internal_change {
             let address = plan
                 .default_sapling_spending_key
                 .to_internal_fvk()
@@ -1127,13 +1109,19 @@ mod tests {
     // reveal is the 110-byte HASH160 HTLC form used by Core and checked by
     // Pirate v6.0.14's CScript::IsRedeemScriptReveal.
     fn witnessed_sapling_note(key: &ExtendedSpendingKey, value: u64) -> SelectableNote {
-        use incrementalmerkletree::{Hashable, Level, MerklePath, Position};
         let (_, address) = key.inner().default_address();
         let note = sapling::Note::from_parts(
             address,
             sapling::value::NoteValue::from_raw(value),
             sapling::Rseed::AfterZip212([8; 32]),
         );
+        sapling_note_with_witness(note)
+    }
+
+    fn sapling_note_with_witness(note: sapling::Note) -> SelectableNote {
+        use incrementalmerkletree::{Hashable, Level, MerklePath, Position};
+        let value = note.value().inner();
+        let diversifier = *note.recipient().diversifier();
         let path = MerklePath::from_parts(
             (0..32)
                 .map(|level| SaplingNode::empty_root(Level::from(level)))
@@ -1143,7 +1131,7 @@ mod tests {
         .unwrap();
         SelectableNote::new(value, note.cmu().to_bytes().to_vec(), 1, vec![1; 32], 0).with_witness(
             path,
-            *address.diversifier(),
+            diversifier,
             note,
         )
     }
@@ -1236,6 +1224,57 @@ mod tests {
                 transparent.vout[1].script_pubkey(),
                 &script_from_bytes(&reveal)
             );
+            let change_outputs: Vec<_> = tx
+                .sapling_bundle()
+                .unwrap()
+                .shielded_outputs()
+                .iter()
+                .filter_map(|output| {
+                    sapling::note_encryption::try_sapling_output_recovery(
+                        &sapling_key.to_extended_fvk().outgoing_viewing_key(),
+                        output,
+                        sapling::note_encryption::Zip212Enforcement::On,
+                    )
+                })
+                .filter(|(note, _, _)| note.value().inner() > 0)
+                .collect();
+            assert_eq!(change_outputs.len(), 1);
+            let (change_note, change_address, _) = change_outputs.into_iter().next().unwrap();
+            assert_eq!(change_note.value().inner(), 20_000);
+            assert_eq!(
+                change_address,
+                sapling_key.to_internal_fvk().derive_address(0).inner
+            );
+
+            if expect_ironwood {
+                // Spend the recovered internal Sapling change in the next
+                // contract, with no remaining original Sapling input or IW anchor.
+                let next = build_qortal_p2sh_funding_transaction(QortalP2shFundingPlan {
+                    network_type: pirate_params::NetworkType::Mainnet,
+                    default_sapling_spending_key: &sapling_key,
+                    default_ironwood_spending_key: None,
+                    sapling_spending_keys_by_id: HashMap::new(),
+                    ironwood_spending_keys_by_id: HashMap::new(),
+                    available_notes: vec![sapling_note_with_witness(change_note)],
+                    target_height: 5_000_001,
+                    ironwood_activation_height: Some(1),
+                    ironwood_anchor: None,
+                    change_diversifier_index: 0,
+                    recipients: vec![QortalRecipient::Transparent {
+                        address,
+                        amount: 10_000,
+                    }],
+                    fee: 10_000,
+                    script_pubkey: reveal.clone(),
+                    script_each_recipient: true,
+                })
+                .unwrap();
+                let next_tx = crate::read_pirate_transaction(&next.raw_tx)
+                    .unwrap()
+                    .into_data();
+                assert_eq!(next_tx.sapling_bundle().unwrap().shielded_spends().len(), 1);
+                assert!(next_tx.ironwood_bundle().is_none());
+            }
         }
     }
 
