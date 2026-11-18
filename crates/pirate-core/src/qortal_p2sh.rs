@@ -4,7 +4,9 @@ use crate::fees::{apply_dust_policy_add_to_fee, CHANGE_DUST_THRESHOLD};
 use crate::keys::{ExtendedSpendingKey, IronwoodExtendedSpendingKey, PaymentAddress};
 use crate::memo::Memo;
 use crate::params::{ironwood_params, try_sapling_prover};
-use crate::selection::{NoteType, SelectableNote};
+use crate::selection::{
+    NoteSelector, NoteType, SelectableNote, SelectionResult, SelectionStrategy,
+};
 use crate::shielded_builder::SelectedSpendNoteRef;
 use crate::transaction::PirateNetwork;
 use crate::{Error, Result};
@@ -102,6 +104,54 @@ fn recipient_total(recipients: &[QortalRecipient]) -> Result<u64> {
         total
             .checked_add(amount)
             .ok_or_else(|| Error::AmountOverflow("Output amount overflow".to_string()))
+    })
+}
+
+/// Select contract funding inputs with at least one positive-value Sapling spend.
+///
+/// Pirate's transparent P2SH funding exception requires a Sapling spend. Ironwood
+/// inputs can supplement it, but an Ironwood-only transaction is rejected with
+/// `bad-txns-acprivacy-chain`. Ordinary shielded sends use their own selector.
+pub fn select_qortal_p2sh_funding_notes(
+    mut available_notes: Vec<SelectableNote>,
+    recipients: &[QortalRecipient],
+    fee: u64,
+) -> Result<SelectionResult> {
+    let required = recipient_total(recipients)?
+        .checked_add(fee)
+        .ok_or_else(|| Error::AmountOverflow("Output + fee overflow".to_string()))?;
+    let sapling_index = available_notes
+        .iter()
+        .enumerate()
+        .filter(|(_, note)| note.note_type == NoteType::Sapling && note.value > 0)
+        .min_by_key(|(_, note)| note.value)
+        .map(|(index, _)| index)
+        .ok_or_else(|| {
+            Error::TransactionBuild(
+                "Qortal P2SH funding requires a spendable Sapling note; Ironwood-only funds cannot fund this contract"
+                    .to_string(),
+            )
+        })?;
+
+    let sapling_note = available_notes.remove(sapling_index);
+    let mut total_value = sapling_note.value;
+    let mut notes = vec![sapling_note];
+    if total_value < required {
+        let remaining = NoteSelector::new(SelectionStrategy::SmallestFirst).select_notes(
+            available_notes,
+            required - total_value,
+            0,
+        )?;
+        total_value = total_value
+            .checked_add(remaining.total_value)
+            .ok_or_else(|| Error::AmountOverflow("Selected input value overflow".to_string()))?;
+        notes.extend(remaining.notes);
+    }
+
+    Ok(SelectionResult {
+        notes,
+        total_value,
+        change: total_value - required,
     })
 }
 
@@ -351,9 +401,8 @@ pub fn build_qortal_p2sh_funding_transaction(
         .checked_add(plan.fee)
         .ok_or_else(|| Error::AmountOverflow("Output + fee overflow".to_string()))?;
 
-    let selector =
-        crate::selection::NoteSelector::new(crate::selection::SelectionStrategy::SmallestFirst);
-    let selection = selector.select_notes(plan.available_notes, total_value, plan.fee)?;
+    let selection =
+        select_qortal_p2sh_funding_notes(plan.available_notes, &plan.recipients, plan.fee)?;
     let change = selection
         .total_value
         .checked_sub(target_total)
@@ -991,6 +1040,202 @@ mod tests {
             lock_time,
             secret,
             privkey: SecretKey::from_slice(&[3u8; 32]).unwrap(),
+        }
+    }
+
+    fn selection_notes(sapling: &[u64], ironwood: &[u64]) -> Vec<SelectableNote> {
+        sapling
+            .iter()
+            .map(|&value| SelectableNote::new(value, vec![], 1, vec![], 0))
+            .chain(
+                ironwood
+                    .iter()
+                    .map(|&value| SelectableNote::new_ironwood(value, vec![], 1, vec![], 0)),
+            )
+            .collect()
+    }
+
+    #[test]
+    fn qortal_funding_selection_requires_sapling_even_when_ironwood_covers_cost() {
+        let selected = select_qortal_p2sh_funding_notes(
+            selection_notes(&[80_000, 60_000], &[30_000, 50_000]),
+            &[transparent_recipient(1, 20_000)],
+            10_000,
+        )
+        .unwrap();
+        assert_eq!(selected.notes.len(), 1);
+        assert_eq!(selected.notes[0].note_type, NoteType::Sapling);
+        assert_eq!(selected.total_value, 60_000);
+        assert_eq!(selected.change, 30_000);
+    }
+
+    #[test]
+    fn qortal_funding_selection_allows_mixed_inputs_and_preserves_identity() {
+        let mut notes = selection_notes(&[10_000], &[50_000]);
+        notes[0].key_id = Some(7);
+        notes[0].nullifier = Some(vec![42; 32]);
+        let selected =
+            select_qortal_p2sh_funding_notes(notes, &[transparent_recipient(1, 40_000)], 10_000)
+                .unwrap();
+        assert_eq!(selected.notes.len(), 2);
+        assert_eq!(selected.notes[0].note_type, NoteType::Sapling);
+        assert_eq!(selected.notes[0].key_id, Some(7));
+        assert_eq!(selected.notes[0].nullifier, Some(vec![42; 32]));
+        assert_eq!(selected.notes[1].note_type, NoteType::Ironwood);
+        assert_eq!(selected.total_value, 60_000);
+        assert_eq!(selected.change, 10_000);
+    }
+
+    #[test]
+    fn qortal_funding_selection_rejects_ironwood_only_and_zero_value_sapling() {
+        for sapling in [vec![], vec![0]] {
+            let error = select_qortal_p2sh_funding_notes(
+                selection_notes(&sapling, &[1_000_000]),
+                &[transparent_recipient(1, 20_000)],
+                10_000,
+            )
+            .unwrap_err();
+            assert!(matches!(error, Error::TransactionBuild(_)));
+            assert!(error.to_string().starts_with(
+                "Transaction build error: Qortal P2SH funding requires a spendable Sapling note"
+            ));
+        }
+    }
+
+    #[test]
+    fn qortal_funding_selection_checks_amount_overflow() {
+        let error = select_qortal_p2sh_funding_notes(
+            selection_notes(&[u64::MAX], &[]),
+            &[transparent_recipient(1, u64::MAX)],
+            1,
+        )
+        .unwrap_err();
+        assert!(matches!(error, Error::AmountOverflow(_)));
+        let error = select_qortal_p2sh_funding_notes(
+            selection_notes(&[u64::MAX], &[]),
+            &[
+                transparent_recipient(1, u64::MAX),
+                transparent_recipient(2, 1),
+            ],
+            0,
+        )
+        .unwrap_err();
+        assert!(matches!(error, Error::AmountOverflow(_)));
+    }
+
+    // Genuine notes and witnesses exercise the full proving/signing path. The
+    // reveal is the 110-byte HASH160 HTLC form used by Core and checked by
+    // Pirate v6.0.14's CScript::IsRedeemScriptReveal.
+    fn witnessed_sapling_note(key: &ExtendedSpendingKey, value: u64) -> SelectableNote {
+        use incrementalmerkletree::{Hashable, Level, MerklePath, Position};
+        let (_, address) = key.inner().default_address();
+        let note = sapling::Note::from_parts(
+            address,
+            sapling::value::NoteValue::from_raw(value),
+            sapling::Rseed::AfterZip212([8; 32]),
+        );
+        let path = MerklePath::from_parts(
+            (0..32)
+                .map(|level| SaplingNode::empty_root(Level::from(level)))
+                .collect(),
+            Position::from(0),
+        )
+        .unwrap();
+        SelectableNote::new(value, note.cmu().to_bytes().to_vec(), 1, vec![1; 32], 0).with_witness(
+            path,
+            *address.diversifier(),
+            note,
+        )
+    }
+
+    fn witnessed_ironwood_note(key: &IronwoodExtendedSpendingKey, value: u64) -> SelectableNote {
+        use incrementalmerkletree::{Hashable, Level};
+        use orchard::note::{NoteVersion, RandomSeed, Rho};
+        let address = key.to_extended_fvk().address_at(0);
+        let rho = Rho::from_bytes(&[7; 32]).unwrap();
+        let rseed = RandomSeed::from_bytes([9; 32], &rho).unwrap();
+        let note = orchard::Note::from_parts(
+            address.inner,
+            IronwoodNoteValue::from_raw(value),
+            rho,
+            rseed,
+            NoteVersion::V3,
+        )
+        .unwrap();
+        let commitment = orchard::note::ExtractedNoteCommitment::from(note.commitment());
+        let path = orchard::tree::MerklePath::from_parts(
+            0,
+            std::array::from_fn(|level| {
+                orchard::tree::MerkleHashOrchard::empty_root(Level::from(level as u8))
+            }),
+        );
+        let anchor = path.root(commitment).into();
+        SelectableNote::new_ironwood(value, commitment.to_bytes().to_vec(), 1, vec![2; 32], 0)
+            .with_ironwood_witness(anchor, 0, path, note)
+    }
+
+    #[test]
+    fn qortal_funding_serializes_sapling_and_mixed_contract_inputs() {
+        let sapling_key = sample_spending_key();
+        let ironwood_key = IronwoodExtendedSpendingKey::master(&[7; 32]).unwrap();
+        let reveal = hex::decode("6a4c6b630400f15365b175210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ac6782012088a914070707070707070707070707070707070707070788210279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798ac68").unwrap();
+        let address = TransparentAddress::ScriptHash(
+            hex::decode("07cc6303b80362220b416c144940bebcf6f3839c")
+                .unwrap()
+                .try_into()
+                .unwrap(),
+        );
+        for (sapling_value, ironwood_value, amount, expect_ironwood) in [
+            (50_000, 30_000, 20_000, false), // Old smallest-first chose Ironwood alone.
+            (10_000, 50_000, 30_000, true),
+        ] {
+            let ironwood_note = witnessed_ironwood_note(&ironwood_key, ironwood_value);
+            let ironwood_anchor = ironwood_note.ironwood_anchor;
+            let signed = build_qortal_p2sh_funding_transaction(QortalP2shFundingPlan {
+                network_type: pirate_params::NetworkType::Mainnet,
+                default_sapling_spending_key: &sapling_key,
+                default_ironwood_spending_key: Some(&ironwood_key),
+                sapling_spending_keys_by_id: HashMap::new(),
+                ironwood_spending_keys_by_id: HashMap::new(),
+                available_notes: vec![
+                    witnessed_sapling_note(&sapling_key, sapling_value),
+                    ironwood_note,
+                ],
+                target_height: 5_000_000,
+                ironwood_activation_height: Some(1),
+                ironwood_anchor,
+                change_diversifier_index: 0,
+                recipients: vec![QortalRecipient::Transparent { address, amount }],
+                fee: 10_000,
+                script_pubkey: reveal.clone(),
+                script_each_recipient: true,
+            })
+            .unwrap();
+            let tx = crate::read_pirate_transaction(&signed.raw_tx)
+                .unwrap()
+                .into_data();
+            assert_eq!(tx.sapling_bundle().unwrap().shielded_spends().len(), 1);
+            assert_eq!(tx.ironwood_bundle().is_some(), expect_ironwood);
+            assert_eq!(
+                signed.spent_notes.len(),
+                if expect_ironwood { 2 } else { 1 }
+            );
+            let transparent = tx.transparent_bundle().unwrap();
+            assert!(transparent.vin.is_empty());
+            assert_eq!(transparent.vout.len(), 2);
+            assert_eq!(
+                transparent.vout[0].value(),
+                Amount::from_u64(amount).unwrap()
+            );
+            assert_eq!(
+                transparent.vout[0].script_pubkey(),
+                &Script::from(address.script())
+            );
+            assert_eq!(transparent.vout[1].value(), Amount::ZERO);
+            assert_eq!(
+                transparent.vout[1].script_pubkey(),
+                &script_from_bytes(&reveal)
+            );
         }
     }
 

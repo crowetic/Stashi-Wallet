@@ -43,8 +43,8 @@ pub use params::{initialize_sapling_parameters, ironwood_params, try_sapling_pro
 pub use params::{sapling_params, sapling_prover};
 pub use qortal_p2sh::{
     build_p2sh_script_sig, build_qortal_p2sh_funding_transaction,
-    build_qortal_p2sh_redeem_transaction, build_script_pubkey, QortalP2shFundingPlan,
-    QortalP2shRedeemPlan, QortalRecipient,
+    build_qortal_p2sh_redeem_transaction, build_script_pubkey, select_qortal_p2sh_funding_notes,
+    QortalP2shFundingPlan, QortalP2shRedeemPlan, QortalRecipient,
 };
 pub use selection::{NoteSelector, NoteType, SelectableNote, SelectionResult, SelectionStrategy};
 pub use shielded_builder::{

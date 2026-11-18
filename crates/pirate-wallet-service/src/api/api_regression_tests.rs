@@ -324,9 +324,16 @@ fn qortal_funding_hydrates_sapling_and_ironwood_at_their_own_anchors() {
             default_ironwood_spending_key: Some(&ironwood_key),
             sapling_spending_keys_by_id: HashMap::new(),
             ironwood_spending_keys_by_id: HashMap::new(),
-            available_notes: raw
+            // Hydrate the required Sapling input, but deliberately remove the
+            // Ironwood path to keep the original missing-witness regression.
+            available_notes: super::qortal_p2sh::load_funding_notes(&db, &repo, account_id, key)
+                .unwrap()
+                .1
                 .into_iter()
-                .filter(|n| n.ironwood_note.is_some())
+                .map(|mut note| {
+                    note.ironwood_merkle_path = None;
+                    note
+                })
                 .collect(),
             target_height: 5_000_000,
             ironwood_activation_height: Some(1),
@@ -334,7 +341,7 @@ fn qortal_funding_hydrates_sapling_and_ironwood_at_their_own_anchors() {
             change_diversifier_index: 0,
             recipients: vec![pirate_core::QortalRecipient::Transparent {
                 address: zcash_transparent::address::TransparentAddress::ScriptHash([1; 20]),
-                amount: 20_000,
+                amount: 40_000,
             }],
             fee: 10_000,
             script_pubkey: vec![0x6a, 0x00],

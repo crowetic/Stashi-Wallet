@@ -195,12 +195,29 @@ cargo test -p pirate-cli-core --lib qortal_ --locked
 cargo test -p pirate-core qortal_p2sh --locked -- --nocapture
 ```
 
-### Qortal fork build: JNI 0.3.9
+### Qortal fork build: JNI 0.3.10
 
 The Qortal fork fixes P2SH funding note selection to hydrate Sapling and Ironwood
 Merkle paths at their respective spend anchors, using the same selection gates
 as ordinary wallet sends. This resolves the native `Missing Ironwood merkle path`
 funding error. It does not change the JNI signatures or database schema.
+
+JNI 0.3.10 also reserves a positive-value Sapling input for P2SH funding.
+Pirate v6.0.14's [P2SH exception](https://github.com/PirateNetwork/pirate/blob/b14db80bfc1a819b958e36d1e0127e94c395d445/src/main.cpp#L1877-L1888)
+requires at least one Sapling spend; selecting
+only Ironwood inputs can produce `bad-txns-acprivacy-chain`. Mixed Sapling and
+Ironwood inputs remain supported. An Ironwood-only source key group now returns
+`Transaction build error: Qortal P2SH funding requires a spendable Sapling note`
+before proving or broadcasting. It does not automatically move funds between
+pools. Core recognizes this pre-broadcast error as a rejected funding attempt;
+unknown broadcast errors must still retain their duplicate-funding quarantine.
+Change-address registration now follows the selected input pools.
+
+This changes neither wallet nor Core database schemas, JNI signatures, nor the
+indexed redeem/refund commands from 0.3.9. Reverting the native library requires
+a Core restart; retain pending trade and wallet recovery records. A new JAR alone
+does not install this native fix. Selection and serialization regressions do not
+prove a real funded trade or refund was accepted by a live Pirate node.
 
 The **Qortal JNI - Combined Native Bundle** workflow in `.github/workflows/qortal-jni.yml`
 can be run manually on the fork's default branch. It runs the Qortal funding,
@@ -210,7 +227,7 @@ switching between two isolated storage namespaces. This tests sequential
 namespace selection; independent concurrent historical rescans still require
 separate native contexts or processes.
 
-The combined Actions artifact contains `stashi-qortal-jni-0.3.9-<commit>.zip`,
+The combined Actions artifact contains `stashi-qortal-jni-0.3.10-<commit>.zip`,
 its SHA-256 file, and a manifest. The ZIP has all five libraries, the Java
 wrapper, handoff, license, per-file checksums, and the source commit and workflow
 identity. Packaging rejects missing platforms, mismatched source revisions,

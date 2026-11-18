@@ -4,8 +4,9 @@ use pirate_core::keys::{
     ExtendedSpendingKey, IronwoodExtendedSpendingKey, IronwoodPaymentAddress, PaymentAddress,
 };
 use pirate_core::{
-    build_qortal_p2sh_funding_transaction, build_qortal_p2sh_redeem_transaction, Memo,
-    QortalP2shFundingPlan, QortalP2shRedeemPlan, QortalRecipient,
+    build_qortal_p2sh_funding_transaction, build_qortal_p2sh_redeem_transaction,
+    select_qortal_p2sh_funding_notes, Memo, QortalP2shFundingPlan, QortalP2shRedeemPlan,
+    QortalRecipient,
 };
 use zcash_keys::address::Address as RecipientAddress;
 use zcash_transparent::address::TransparentAddress;
@@ -413,6 +414,12 @@ pub async fn qortal_send_p2sh(
         ));
     }
 
+    let recipients = parse_qortal_recipients(network_type, &request.output)?;
+    // Select before resolving anchors or registering change, so both the service
+    // and builder use the pools actually spent. Reject unsupported funding before
+    // proving, persisting a transaction, or broadcasting it.
+    let notes = select_qortal_p2sh_funding_notes(notes, &recipients, request.fee)?.notes;
+
     let orchard_anchor = if notes
         .iter()
         .any(|note| note.note_type == pirate_core::selection::NoteType::Ironwood)
@@ -425,8 +432,6 @@ pub async fn qortal_send_p2sh(
     } else {
         None
     };
-
-    let recipients = parse_qortal_recipients(network_type, &request.output)?;
 
     let has_orchard_spends = notes
         .iter()
