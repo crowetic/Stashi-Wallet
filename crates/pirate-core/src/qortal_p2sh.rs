@@ -1169,7 +1169,7 @@ mod tests {
                 orchard::tree::MerkleHashOrchard::empty_root(Level::from(level as u8))
             }),
         );
-        let anchor = path.root(commitment).into();
+        let anchor = path.root(commitment);
         SelectableNote::new_ironwood(value, commitment.to_bytes().to_vec(), 1, vec![2; 32], 0)
             .with_ironwood_witness(anchor, 0, path, note)
     }
