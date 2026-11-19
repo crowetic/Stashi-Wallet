@@ -73,7 +73,8 @@ jobs:
             target: x86_64-pc-windows-msvc
           - os: macos-15-intel
             target: x86_64-apple-darwin
-          - os: macos-15
+          # Use the separate Tahoe pool after repeated macos-15 ARM queue failures.
+          - os: macos-26
             target: aarch64-apple-darwin
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -98,7 +99,11 @@ jobs:
         shell: bash
         env:
           QORTAL_JNI_TARGET: ${{ matrix.target }}
-        run: bash scripts/build-qortal-jni.sh
+        run: |
+          if [[ "$QORTAL_JNI_TARGET" == aarch64-apple-darwin ]]; then
+            export MACOSX_DEPLOYMENT_TARGET=11.0
+          fi
+          bash scripts/build-qortal-jni.sh
       - name: Check Linux compatibility
         if: runner.os == 'Linux'
         run: python scripts/verify_linux_glibc.py --max-version 2.35 dist/qortal-jni
