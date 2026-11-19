@@ -81,6 +81,7 @@ pub(crate) mod payment_disclosure;
 pub(crate) mod provisioning;
 pub(crate) mod qortal;
 pub(crate) mod qortal_p2sh;
+pub(crate) mod qortal_preparation;
 pub(crate) mod seed_account_discovery;
 pub(crate) mod seed_export;
 pub(crate) mod sync_control;
@@ -102,6 +103,7 @@ pub use self::qortal::{
     qortal_sync_status, QortalSendRequest,
 };
 pub use self::qortal_p2sh::{QortalP2shRedeemRequest, QortalP2shSendRequest};
+pub use self::qortal_preparation::{qortal_trade_preparation, QortalPreparationRequest};
 pub use self::seed_export::SeedExportWarnings;
 use self::wallet_registry::{
     auto_consolidation_enabled, ensure_wallet_registry_loaded, get_wallet_meta,

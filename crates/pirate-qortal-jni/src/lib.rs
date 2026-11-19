@@ -6,8 +6,8 @@ use jni::JNIEnv;
 use pirate_core::mnemonic::{inspect_mnemonic, mnemonic_from_entropy};
 use pirate_wallet_service::{
     KeyExportInfo, KeyGroupInfo, MnemonicLanguage, NodeTestResult, QortalP2shRedeemRequest,
-    QortalP2shSendRequest, QortalSendRequest, SyncMode, SyncStatus, WalletMeta, WalletService,
-    WalletServiceRequest,
+    QortalP2shSendRequest, QortalPreparationRequest, QortalSendRequest, SyncMode, SyncStatus,
+    WalletMeta, WalletService, WalletServiceRequest,
 };
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -329,6 +329,11 @@ fn execute_legacy_command(command: &str, args: &str) -> Result<String> {
             limit: None,
         })?,
         "send" => send(args, wallet_id)?,
+        "tradepreparation" => {
+            let request: QortalPreparationRequest = serde_json::from_str(args)
+                .map_err(|err| anyhow!("Invalid tradepreparation JSON: {}", err))?;
+            execute(WalletServiceRequest::QortalTradePreparation { wallet_id, request })?
+        }
         "sendp2sh" => {
             let request: QortalP2shSendRequest = serde_json::from_str(args)
                 .map_err(|err| anyhow!("Invalid sendp2sh JSON: {}", err))?;

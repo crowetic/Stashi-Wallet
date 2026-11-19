@@ -1326,7 +1326,8 @@ impl<'a> Repository<'a> {
         Ok(intents)
     }
 
-    fn outgoing_transaction_is_confirmed(&self, txid: &str) -> Result<bool> {
+    /// Whether the locally scanned transaction history confirms an outgoing transaction.
+    pub fn outgoing_transaction_is_confirmed(&self, txid: &str) -> Result<bool> {
         let mut candidates = vec![txid.to_string()];
         if let Some(reversed) = reverse_txid_hex(txid) {
             if reversed != txid {
@@ -6270,6 +6271,70 @@ impl<'a> Repository<'a> {
         }
 
         Ok(updated_count)
+    }
+
+    /// Reserve every input of an already signed preparation transaction before broadcast.
+    /// A retry is idempotent; a conflicting spend or missing input rolls back all updates.
+    /// Uses existing note and outgoing-intent storage, without a schema change.
+    pub fn reserve_signed_transaction_inputs(
+        &self,
+        account_id: i64,
+        nullifiers: &[[u8; 32]],
+        txid: &[u8; 32],
+    ) -> Result<()> {
+        if nullifiers.is_empty() {
+            return Err(Error::Validation("Preparation has no inputs".into()));
+        }
+        let tx = self.db.conn().unchecked_transaction()?;
+        // Acquire the write lock before inspecting encrypted input state.
+        tx.execute("UPDATE notes SET id = id WHERE 0", [])?;
+        let mut found = std::collections::HashSet::new();
+        let mut stmt =
+            tx.prepare("SELECT id, account_id, nullifier, spent, spent_txid FROM notes")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, Vec<u8>>(2)?,
+                row.get::<_, Vec<u8>>(3)?,
+                row.get::<_, Option<Vec<u8>>>(4)?,
+            ))
+        })?;
+        let mut ids = Vec::new();
+        for row in rows {
+            let (id, account, nullifier, spent, spent_txid) = row?;
+            if self.decrypt_int64(&account)? != account_id {
+                continue;
+            }
+            let nf = self.decrypt_blob(&nullifier)?;
+            let Ok(nf) = <[u8; 32]>::try_from(nf.as_slice()) else {
+                continue;
+            };
+            if !nullifiers.contains(&nf) {
+                continue;
+            }
+            if self.decrypt_bool(&spent)?
+                && self.decrypt_optional_blob(spent_txid)?.as_deref() != Some(txid.as_slice())
+            {
+                return Err(Error::Validation(
+                    "Preparation input already belongs to another transaction".into(),
+                ));
+            }
+            found.insert(nf);
+            ids.push(id);
+        }
+        drop(stmt);
+        if !nullifiers.iter().all(|nf| found.contains(nf)) {
+            return Err(Error::Validation("Preparation input is missing".into()));
+        }
+        for id in ids {
+            tx.execute(
+                "UPDATE notes SET spent = ?1, spent_txid = ?2 WHERE id = ?3",
+                params![self.encrypt_bool(true)?, self.encrypt_blob(txid)?, id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /// Mark notes as spent for any nullifier in the provided set and record the spending txid.

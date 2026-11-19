@@ -10,7 +10,7 @@ version = "0.3.7"
 artifact = "pirate-qortal-cli"
 
 [qortal_jni]
-version = "0.3.10"
+version = "0.3.11"
 artifact = "pirate-qortal-jni"
 
 [native_ffi]

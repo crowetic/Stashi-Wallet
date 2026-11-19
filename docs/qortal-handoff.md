@@ -195,6 +195,47 @@ cargo test -p pirate-cli-core --lib qortal_ --locked
 cargo test -p pirate-core qortal_p2sh --locked -- --nocapture
 ```
 
+### Qortal fork build: JNI 0.3.11
+
+Adds `execute("tradepreparation", json)` and the corresponding typed service
+request. This is an explicit, fee-approved preparation payment for Ironwood-only
+Qortal cross-chain trade wallets. The P2SH Sapling-spend guard stays in place.
+
+A query supplies `input` (owned source address) and positive `required_amount`
+(integer arrrtoshis: trade principal plus contract spend reserve and funding fee).
+It returns `ready`, `insufficient`, `needsPreparation` or `pending`. A fresh
+quote reports `quoteId`, `amount`, `destination` and `fee` (10,000 arrrtoshis).
+The destination is derived from the source key group's Sapling spending key;
+callers cannot choose it. Preparation transfers all eligible, currently spendable
+Ironwood funds minus the fee to that owned address, with zero change. This can
+remain in the wallet even if the intended trade subsequently fails or expires.
+
+Only resubmitting the exact `approved_quote` and `max_fee` signs/broadcasts.
+Quotes bind the wallet, network, key group, destination, required amount and
+eligible input set. A changed quote requires fresh approval. A pending approval
+rebroadcasts the existing signed bytes, never creates another payment. Querying
+pending status does not broadcast. Wait for normal confirmation, scan and witness
+readiness before starting the contract funding call.
+
+Before any network call, a private sidecar beside the wallet database saves the
+signed transaction and input context with an atomic rename and file sync. An OS
+file lock serializes preparation requests. Existing outgoing-intent and note
+storage reserves every input before broadcast; conflicts/missing inputs fail
+atomically. Unknown broadcast acceptance retains the signed transaction. A retry
+or restart repairs any interrupted reservation and uses the same transaction.
+Confirmed or locally scanned expired attempts are archived; the existing expiry
+reconciler releases only expired reservations. Preserve both the database and
+all `.qortal-preparation-*` files for recovery, including on rollback. No wallet
+or Core schema migration or new JNI method signature is introduced.
+
+Requires matching Core `/crosschain/arrr/tradepreparation` support and Hub's
+separate preparation fee approval. An older native library fails closed. Core's
+previous QDN publication cannot provide this feature: build all five platforms,
+verify the combined 0.3.11 bundle, publish it through the existing owner signing
+workflow, then select that confirmed signature. No publication or real payment
+is performed by the automated fixtures. Real trade/refund acceptance remains a
+separate test.
+
 ### Qortal fork build: JNI 0.3.10
 
 The Qortal fork fixes P2SH funding note selection to hydrate Sapling and Ironwood

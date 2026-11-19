@@ -1162,6 +1162,73 @@ mod tests {
             .with_ironwood_witness(anchor, 0, path, note)
     }
 
+    #[tokio::test]
+    async fn qortal_preparation_spends_ironwood_into_owned_sapling_then_funds_contract() {
+        let sapling_key = sample_spending_key();
+        let ironwood_key = IronwoodExtendedSpendingKey::master(&[7; 32]).unwrap();
+        let note = witnessed_ironwood_note(&ironwood_key, 100_000);
+        let anchor = note.ironwood_anchor;
+        let destination = sapling_key.to_extended_fvk().derive_address(0);
+        let mut builder =
+            crate::shielded_builder::ShieldedBuilder::with_network_and_ironwood_activation_height(
+                pirate_params::NetworkType::Mainnet,
+                Some(1),
+            );
+        builder.with_fee_per_action(10_000);
+        builder
+            .add_sapling_output(destination.clone(), 90_000, None)
+            .unwrap();
+        let signed = builder
+            .build_and_sign(
+                &sapling_key,
+                Some(&ironwood_key),
+                vec![note],
+                5_000_000,
+                anchor,
+                0,
+            )
+            .await
+            .unwrap();
+        let tx = crate::read_pirate_transaction(&signed.raw_tx)
+            .unwrap()
+            .into_data();
+        assert!(tx.transparent_bundle().is_none());
+        assert_eq!(signed.spent_notes.len(), 1);
+        assert_eq!(signed.spent_notes[0].note_type, NoteType::Ironwood);
+        let sapling = tx.sapling_bundle().unwrap();
+        assert!(sapling.shielded_spends().is_empty());
+        assert!(tx.ironwood_bundle().is_some());
+        let outputs: Vec<_> = sapling
+            .shielded_outputs()
+            .iter()
+            .filter_map(|output| {
+                sapling::note_encryption::try_sapling_output_recovery(
+                    &sapling_key.to_extended_fvk().outgoing_viewing_key(),
+                    output,
+                    sapling::note_encryption::Zip212Enforcement::On,
+                )
+            })
+            .filter(|(note, _, _)| note.value().inner() > 0)
+            .collect();
+        assert_eq!(outputs.len(), 1);
+        let (owned_note, address, _) = outputs.into_iter().next().unwrap();
+        assert_eq!(owned_note.value().inner(), 90_000);
+        assert_eq!(address, destination.inner);
+        // Once scanned and witnessed, the exact received note satisfies the
+        // contract selector's Sapling-spend rule with no Ironwood input left.
+        let selected = select_qortal_p2sh_funding_notes(
+            vec![sapling_note_with_witness(owned_note)],
+            &[QortalRecipient::Transparent {
+                address: TransparentAddress::ScriptHash([1; 20]),
+                amount: 50_000,
+            }],
+            10_000,
+        )
+        .unwrap();
+        assert_eq!(selected.notes.len(), 1);
+        assert_eq!(selected.notes[0].note_type, NoteType::Sapling);
+    }
+
     #[test]
     fn qortal_funding_serializes_sapling_and_mixed_contract_inputs() {
         let sapling_key = sample_spending_key();

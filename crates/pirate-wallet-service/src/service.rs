@@ -8,10 +8,11 @@ pub use crate::{
     DepositAddressScope, EndpointPoolDiagnostics, FeeInfo, KeyExportInfo, KeyGroupInfo,
     KeyTypeInfo, LightdEndpoint, NodeTestResult, NoteInfo, Output, PaymentDisclosure,
     PaymentDisclosureVerification, PendingTx, QortalP2shRedeemRequest, QortalP2shSendRequest,
-    QortalSendRequest, SeedExportWarnings, ShieldedPoolBalances, SignedTx, SpendabilityStatus,
-    SyncLogEntryFfi, SyncMode, SyncStatus, TransactionCursor, TransactionDetails, TransactionPage,
-    TransactionRecipient, TunnelMode, TxInfo, VerifiedSpendingKeyImport, VerifiedSpendingKeyPool,
-    WalletId, WalletMeta, WalletSigningStatus, WatchOnlyBannerInfo, WatchOnlyCapabilitiesInfo,
+    QortalPreparationRequest, QortalSendRequest, SeedExportWarnings, ShieldedPoolBalances,
+    SignedTx, SpendabilityStatus, SyncLogEntryFfi, SyncMode, SyncStatus, TransactionCursor,
+    TransactionDetails, TransactionPage, TransactionRecipient, TunnelMode, TxInfo,
+    VerifiedSpendingKeyImport, VerifiedSpendingKeyPool, WalletId, WalletMeta, WalletSigningStatus,
+    WatchOnlyBannerInfo, WatchOnlyCapabilitiesInfo,
 };
 pub use pirate_core::{MnemonicInspection, MnemonicLanguage};
 
@@ -191,6 +192,10 @@ pub enum WalletServiceRequest {
     QortalSend {
         wallet_id: WalletId,
         request: QortalSendRequest,
+    },
+    QortalTradePreparation {
+        wallet_id: WalletId,
+        request: QortalPreparationRequest,
     },
     QortalSendP2sh {
         wallet_id: WalletId,
@@ -755,6 +760,9 @@ impl WalletService {
             }
             WalletServiceRequest::QortalSend { wallet_id, request } => {
                 serialize(ffi::qortal_send(wallet_id, request).await?)
+            }
+            WalletServiceRequest::QortalTradePreparation { wallet_id, request } => {
+                serialize(ffi::qortal_trade_preparation(wallet_id, request).await?)
             }
             WalletServiceRequest::QortalSendP2sh { wallet_id, request } => {
                 serialize(ffi::qortal_send_p2sh(wallet_id, request).await?)

@@ -1120,3 +1120,71 @@ fn transaction_cursor_follows_an_entry_when_its_height_changes() {
 
     assert_eq!(page.transactions, vec![updated[2].clone()]);
 }
+
+#[test]
+fn qortal_preparation_reservations_survive_reopen_and_release_only_after_expiry() {
+    let (db, account_id) = setup_repo();
+    let repo = Repository::new(&db);
+    let key = insert_account_key(
+        &repo,
+        account_id,
+        KeyType::Seed,
+        true,
+        true,
+        true,
+        "preparation",
+    );
+    insert_ironwood_funding_note(&repo, account_id, key, 1, 0, 1000);
+    let txid = [81u8; 32];
+    let txid_hex = hex::encode(txid);
+    repo.upsert_outgoing_transaction_intent(account_id, &txid_hex, 40_000, 10_000, 1000, 1100)
+        .unwrap();
+    repo.reserve_signed_transaction_inputs(account_id, &[[1; 32]], &txid)
+        .unwrap();
+    drop(repo);
+    let repo = Repository::new(&db);
+    assert!(repo.get_unspent_notes(account_id).unwrap().is_empty());
+    repo.reserve_signed_transaction_inputs(account_id, &[[1; 32]], &txid)
+        .unwrap();
+    assert_eq!(
+        repo.release_expired_outgoing_notes(account_id, 1100)
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        repo.release_expired_outgoing_notes(account_id, 1101)
+            .unwrap(),
+        1
+    );
+    assert_eq!(repo.get_unspent_notes(account_id).unwrap().len(), 1);
+}
+
+#[test]
+fn qortal_preparation_reservation_rejects_conflicts_and_missing_inputs_atomically() {
+    let (db, account_id) = setup_repo();
+    let repo = Repository::new(&db);
+    let key = insert_account_key(
+        &repo,
+        account_id,
+        KeyType::Seed,
+        true,
+        true,
+        true,
+        "preparation",
+    );
+    insert_ironwood_funding_note(&repo, account_id, key, 1, 0, 1000);
+    insert_ironwood_funding_note(&repo, account_id, key, 2, 1, 1000);
+    repo.reserve_signed_transaction_inputs(account_id, &[[1; 32]], &[81; 32])
+        .unwrap();
+    assert!(repo
+        .reserve_signed_transaction_inputs(account_id, &[[2; 32], [1; 32]], &[82; 32])
+        .is_err());
+    assert_eq!(repo.get_unspent_notes(account_id).unwrap().len(), 1);
+    assert!(repo
+        .reserve_signed_transaction_inputs(account_id, &[[2; 32], [3; 32]], &[82; 32])
+        .is_err());
+    assert_eq!(repo.get_unspent_notes(account_id).unwrap().len(), 1);
+    // The original transaction still owns its reservation after both failures.
+    repo.reserve_signed_transaction_inputs(account_id, &[[1; 32]], &[81; 32])
+        .unwrap();
+}

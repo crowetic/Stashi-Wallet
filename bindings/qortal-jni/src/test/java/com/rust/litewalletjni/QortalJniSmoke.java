@@ -97,6 +97,12 @@ public final class QortalJniSmoke {
         if (saplingPosition < 0 || (ironwoodPosition >= 0 && ironwoodPosition < saplingPosition)) {
             throw new AssertionError("Qortal balance is not Sapling-first: " + balance);
         }
+        // Invalid JSON shape verifies the command is present without signing,
+        // networking or moving funds in the smoke wallet.
+        String preparation = LiteWalletJni.execute("tradepreparation", "{}");
+        if (!preparation.contains("Invalid tradepreparation JSON")) {
+            throw new AssertionError("Trade preparation command is unavailable: " + preparation);
+        }
         String encryption = LiteWalletJni.execute("encryptionstatus", "");
         if (!encryption.contains("\"encrypted\":true")
                 || !encryption.contains("\"locked\":false")) {

@@ -504,16 +504,16 @@ fn build_and_sign_timeout(num_inputs: u32) -> std::time::Duration {
     std::time::Duration::from_secs(timeout_secs)
 }
 
-#[derive(Debug, Clone)]
-struct BroadcastContext {
-    wallet_id: WalletId,
-    account_id: i64,
-    spent_nullifiers: Vec<Vec<u8>>,
-    sent_amount: u64,
-    fee: u64,
-    change_amount: u64,
-    expiry_height: u32,
-    created_at_ms: u64,
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(super) struct BroadcastContext {
+    pub(super) wallet_id: WalletId,
+    pub(super) account_id: i64,
+    pub(super) spent_nullifiers: Vec<Vec<u8>>,
+    pub(super) sent_amount: u64,
+    pub(super) fee: u64,
+    pub(super) change_amount: u64,
+    pub(super) expiry_height: u32,
+    pub(super) created_at_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -614,7 +614,7 @@ lazy_static::lazy_static! {
         RwLock::new(HashMap::new());
 }
 
-fn store_broadcast_context(txid: &str, context: BroadcastContext) {
+pub(super) fn store_broadcast_context(txid: &str, context: BroadcastContext) {
     let now = unix_timestamp_millis();
     let mut cache = BROADCAST_CONTEXTS.write();
     cache.retain(|_, existing| {
@@ -635,6 +635,14 @@ fn store_broadcast_context(txid: &str, context: BroadcastContext) {
 
 fn take_broadcast_context(txid: &str) -> Option<BroadcastContext> {
     BROADCAST_CONTEXTS.write().remove(txid)
+}
+
+pub(super) fn saved_broadcast_context(txid: &str) -> Result<BroadcastContext> {
+    BROADCAST_CONTEXTS
+        .read()
+        .get(txid)
+        .cloned()
+        .ok_or_else(|| anyhow!("Signed transaction context is unavailable"))
 }
 
 fn broadcast_context_wallet(txid: &str) -> Option<WalletId> {
